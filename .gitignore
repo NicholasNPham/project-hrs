@@ -1,0 +1,58 @@
+# ---------------------------------------------------------------- secrets
+# Logins live in Windows Credential Manager, not here. config.yaml still names
+# the CCIS address, the network drive and later the Graph mailbox, so it stays
+# out too.
+config.yaml
+key.py
+# Certificate for Graph, if it replaces a client secret.
+*.pfx
+*.cer
+*.pem
+
+# ------------------------------------------------------------ booking data
+# The booking spreadsheet carries names and dates of birth. ~$ is the lock
+# file Excel leaves while a workbook is open.
+*.xlsx
+*.xlsm
+*.xls
+*.csv
+~$*
+
+# CCIS printouts carry criminal history. Local copies land in output/ while
+# testing; the real ones go to the network drive.
+*.pdf
+output/
+
+# ------------------------------------------------------------------- output
+logs/
+*.log
+
+# ------------------------------------------------------------- claude code
+# Local agent settings and project notes. They describe how this tool
+# handles personal data and secrets, so they stay on this machine.
+.claude/
+CLAUDE.md
+
+# -------------------------------------------------------------------- python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+ENV/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ----------------------------------------------------------------- editors
+.idea/
+.vscode/
+*.swp
+*~
+
+# ------------------------------------------------------------------- os junk
+.DS_Store
+Thumbs.db
+desktop.ini
