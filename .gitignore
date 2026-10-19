@@ -18,9 +18,10 @@ key.py
 *.csv
 ~$*
 
-# CCIS printouts carry criminal history. Local copies land in output/ while
-# testing; the real ones go to the network drive.
+# CCIS printouts carry criminal history. Local copies land in test/ while
+# testing; the real ones go to the network drive. File names carry names.
 *.pdf
+test/
 output/
 
 # ------------------------------------------------------------------- output

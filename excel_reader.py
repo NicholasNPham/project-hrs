@@ -16,6 +16,8 @@ from typing import NamedTuple
 
 from openpyxl import Workbook, load_workbook
 
+from exceptions import SystemProblem
+
 # The header sits near the top, below any title rows the export adds.
 HEADER_SCAN_ROWS = 20
 
@@ -43,8 +45,8 @@ INVISIBLE_CHARS = dict.fromkeys(map(ord, "\u200b\u200c\u200d\ufeff"), " ")
 EARLIEST_BIRTH_YEAR = 1900
 
 
-class SpreadsheetLayoutError(Exception):
-    """The spreadsheet does not have the expected layout."""
+class SpreadsheetLayoutError(SystemProblem):
+    """The spreadsheet does not have the expected layout. Stops the run."""
 
 
 class Columns(NamedTuple):

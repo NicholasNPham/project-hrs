@@ -1,0 +1,40 @@
+# Copy to config.yaml and fill in. config.yaml is gitignored; never commit it.
+# Every setting below is required. A missing or placeholder value stops the
+# run at startup, before Chrome opens.
+
+ccis:
+  # The CCIS sign-in page.
+  url: "https://ccis.example.com"
+
+  # The Windows Credential Manager entry holding the CCIS login. Shared with
+  # Project-Rap-Sheet, so a password change is made in one place. Logins are
+  # never put in this file; a username or password here is refused.
+  credential_entry: "rap-sheet-ccis"
+
+  # true runs Chrome with no window. The window is fixed at 1920x1080 in that
+  # mode, because the PDF is rendered from the page and a narrower viewport
+  # changes what it looks like. Leave false while testing so you can watch.
+  headless: false
+
+  # Seconds. Carried over from Rap-Sheet and venire, where they are proven.
+  wait_timeout: 5
+  # Short on purpose: how long to wait for the "No matches found." banner.
+  # Most people with a record never show it, so a long value here is added
+  # to every one of them.
+  no_results_wait_timeout: 1
+  pause_between_actions: 1
+
+  # Optional. Every element locator has a working default in ccis.py.
+  # Override one only when a CCIS release renames a field.
+  #
+  # locators:
+  #   last_name_field: "search_tab:personForm:lastname"
+
+paths:
+  # Where PDFs are saved, relative to the project root unless absolute.
+  # test/ is gitignored. This becomes the network drive later.
+  pdfs: "test"
+  logs: "logs"
+  # chromedriver.exe matching your Chrome. Leave "" to let Selenium find one,
+  # or webdriver-manager download one.
+  chromedriver: ""

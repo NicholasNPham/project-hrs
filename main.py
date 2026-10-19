@@ -1,24 +1,36 @@
-"""Check that a real booking spreadsheet reads correctly.
+"""Run HRS: read the booking spreadsheet, search CCIS for each person, save PDFs.
 
-Prints only counts, row numbers and reasons, never a name, DOB or any other
-cell value, so the output is safe to paste into a chat or a ticket. This
-becomes the full run once the CCIS and folder stages exist.
+    python main.py <spreadsheet.xlsx>             search everyone
+    python main.py <spreadsheet.xlsx> --limit 3   search the first 3 only
+    python main.py <spreadsheet.xlsx> --check     read the sheet only, no CCIS
+
+Console and log lines name spreadsheet rows, never people, so either is safe
+to paste. The PDFs themselves are named LAST_FIRST.pdf, so the folder they
+land in is gitignored.
 """
 
+import argparse
+import re
 import sys
 from collections import Counter
+from datetime import date
 from pathlib import Path
 
 from openpyxl import load_workbook
 
-from excel_reader import (
-    HEADER_SCAN_ROWS,
-    SUFFIXES,
-    Person,
-    SpreadsheetLayoutError,
-    find_columns,
-    read_people,
-)
+from ccis import CcisSession
+from config_loader import load_config
+from excel_reader import HEADER_SCAN_ROWS, SUFFIXES, Person, find_columns, read_people
+from exceptions import RowProblem, SystemProblem
+from logger import get_logger, setup_logging
+
+# Anything outside these is replaced in file names. Windows refuses some
+# characters outright, and a stray one would fail the write for that person.
+UNSAFE_FILENAME_CHARS = re.compile(r"[^A-Za-z0-9'-]+")
+
+HISTORY = "criminal history"
+NO_RESULTS = "no results found"
+NEEDS_A_LOOK = "needs a look by hand"
 
 
 def describe_layout(path: Path) -> None:
@@ -67,23 +79,121 @@ def describe_people(people: list[Person]) -> None:
         print(f"  {count:>4}  {shape}")
 
 
+def pdf_name(person: Person, used: set[str]) -> str:
+    """Return LAST_FIRST.pdf, adding _2, _3 when two people in a run share it.
+
+    A file left from an earlier run with the same name is overwritten, so a
+    rerun replaces its own PDFs instead of piling up copies.
+    """
+    stem = "_".join(
+        UNSAFE_FILENAME_CHARS.sub("-", part).strip("-").upper()
+        for part in (person.last, person.first)
+    )
+    name = f"{stem}.pdf"
+    copy = 2
+    while name in used:
+        name = f"{stem}_{copy}.pdf"
+        copy += 1
+    used.add(name)
+    return name
+
+
+def search_people(config: dict, people: list[Person]) -> dict[str, list[int]]:
+    """Search CCIS for each person and save their PDF.
+
+    Returns the spreadsheet rows under each outcome. A RowProblem sends that
+    person to "needs a look by hand" and the run carries on; a SystemProblem
+    stops it.
+    """
+    log = get_logger()
+    pdf_dir: Path = config["paths"]["pdfs"]
+    try:
+        pdf_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as error:
+        raise SystemProblem(f"Could not create the PDF folder: {error}") from error
+
+    outcomes: dict[str, list[int]] = {HISTORY: [], NO_RESULTS: [], NEEDS_A_LOOK: []}
+    used: set[str] = set()
+    with CcisSession(config) as ccis:
+        for number, person in enumerate(people, start=1):
+            try:
+                result = ccis.fetch_pdf(person.first, person.last, person.dob)
+            except RowProblem as error:
+                log.warning("Row %d (%d of %d): %s: %s",
+                            person.row, number, len(people), NEEDS_A_LOOK, error)
+                outcomes[NEEDS_A_LOOK].append(person.row)
+                continue
+
+            try:
+                (pdf_dir / pdf_name(person, used)).write_bytes(result.pdf_bytes)
+            except OSError as error:
+                # A folder that cannot be written to fails every person after
+                # this one too, so it stops the run.
+                raise SystemProblem(
+                    f"Could not save the PDF for row {person.row}: {type(error).__name__}"
+                ) from error
+
+            outcome = HISTORY if result.has_record else NO_RESULTS
+            log.info("Row %d (%d of %d): %s", person.row, number, len(people), outcome)
+            outcomes[outcome].append(person.row)
+    return outcomes
+
+
+def run(path: Path, limit: int | None) -> int:
+    """Load config, read the sheet, search everyone ready, and print a summary."""
+    config = load_config()
+    setup_logging(config["paths"]["logs"] / f"{date.today():%Y-%m-%d}.log")
+    log = get_logger()
+
+    people = read_people(path)
+    ready = [p for p in people if not p.problem]
+    flagged = [p for p in people if p.problem]
+    log.info("People found: %d, ready: %d, flagged: %d",
+             len(people), len(ready), len(flagged))
+    for person in flagged:
+        log.warning("Row %d: not searched: %s", person.row, person.problem)
+    if limit is not None:
+        ready = ready[:limit]
+        log.info("Limited to the first %d ready", len(ready))
+
+    outcomes = search_people(config, ready)
+
+    print()
+    print(f"Searched:             {len(ready)}")
+    for outcome, rows in outcomes.items():
+        print(f"{outcome + ':':<22}{len(rows)}")
+    for row in outcomes[NEEDS_A_LOOK]:
+        print(f"  row {row}")
+    print(f"Flagged, not searched: {len(flagged)}")
+    for person in flagged:
+        print(f"  row {person.row}: {person.problem}")
+    return 0
+
+
 def main() -> int:
-    """Read the spreadsheet named on the command line and print a summary."""
-    if len(sys.argv) != 2:
-        print("Usage: python main.py <booking spreadsheet .xlsx>")
-        return 2
-    path = Path(sys.argv[1])
-    if not path.is_file():
+    """Parse the command line and run, turning a SystemProblem into exit code 1."""
+    parser = argparse.ArgumentParser(description="Search CCIS for everyone on a booking sheet.")
+    parser.add_argument("spreadsheet", type=Path)
+    parser.add_argument("--limit", type=int, help="search only the first N ready people")
+    parser.add_argument("--check", action="store_true", help="read the sheet only, no CCIS")
+    args = parser.parse_args()
+
+    if not args.spreadsheet.is_file():
         print("File not found.")
+        return 2
+    if args.limit is not None and args.limit < 1:
+        print("--limit must be 1 or more.")
         return 2
 
     try:
-        describe_layout(path)
-        describe_people(read_people(path))
-    except SpreadsheetLayoutError as error:
-        print(f"Layout problem: {error}")
+        if args.check:
+            describe_layout(args.spreadsheet)
+            describe_people(read_people(args.spreadsheet))
+            return 0
+        return run(args.spreadsheet, args.limit)
+    except SystemProblem as error:
+        print(f"Stopped: {error}")
         return 1
-    return 0
 
 
 if __name__ == "__main__":
