@@ -16,9 +16,23 @@ from exceptions import ConfigProblem
 PROJECT_ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = PROJECT_ROOT / "config.yaml"
 
+# The Credential Manager entry PROJECT-DALYN keeps its Graph client secret
+# under. HRS signs in as the same app, so it reads the same entry and a new
+# secret is set in one place.
+GRAPH_SECRET_SERVICE = "DALYN"
+GRAPH_SECRET_KEY = "graph_client_secret"
+
 # Values config.example.yaml ships with. Seeing one means config.yaml was
 # copied but not filled in.
-PLACEHOLDERS = frozenset({"", "https://ccis.example.com"})
+PLACEHOLDERS = frozenset({
+    "",
+    "https://ccis.example.com",
+    "mailbox@example.com",
+    "sender@example.com",
+    "PASTE-TENANT-ID",
+    "PASTE-CLIENT-ID",
+    "PASTE-SUBJECT-PHRASE",
+})
 
 
 def _section(config: dict, name: str) -> dict:
@@ -77,10 +91,36 @@ def _read_login(entry: str) -> tuple[str, str]:
     return credential.username, credential.password
 
 
+def _read_secret(service: str, key: str) -> str:
+    """Read one secret stored under service/key in Windows Credential Manager."""
+    try:
+        secret = keyring.get_password(service, key)
+    except KeyringError as error:
+        raise ConfigProblem(
+            f"Could not read '{service}/{key}' from Windows Credential Manager: {error}"
+        ) from error
+    if not secret or not secret.strip():
+        raise ConfigProblem(
+            f"No secret stored under '{service}/{key}' in Windows Credential Manager. "
+            "Run PROJECT-DALYN's set_credentials.py as this Windows account."
+        )
+    return secret
+
+
+def _address(section: dict, key: str, where: str) -> str:
+    """Return an email address setting, refusing one without a single @."""
+    value = _text(section, key, where)
+    # The address is left out of the message because it reaches the console.
+    if value.count("@") != 1:
+        raise ConfigProblem(f"{where}.{key} in config.yaml is not an email address.")
+    return value
+
+
 def load_config(path: Path = CONFIG_PATH) -> dict:
     """Read and validate config.yaml, and add the CCIS login from Credential Manager.
 
-    Returns the config with ccis.username and ccis.password filled in, every
+    Returns the config with ccis.username, ccis.password and
+    graph.client_secret filled in from Credential Manager, every
     setting checked, and paths resolved to absolute Path objects.
     """
     if not path.is_file():
@@ -112,6 +152,18 @@ def load_config(path: Path = CONFIG_PATH) -> dict:
         raise ConfigProblem("ccis.locators must be a mapping of name to locator.")
     ccis["locators"] = locators
     ccis["username"], ccis["password"] = _read_login(ccis["credential_entry"])
+
+    graph = _section(config, "graph")
+    if "client_secret" in graph:
+        raise ConfigProblem(
+            "graph.client_secret is in config.yaml. The secret lives in Windows "
+            "Credential Manager; delete that line."
+        )
+    for key in ("tenant_id", "client_id", "subject_contains"):
+        graph[key] = _text(graph, key, "graph")
+    graph["mailbox"] = _address(graph, "mailbox", "graph")
+    graph["sender"] = _address(graph, "sender", "graph")
+    graph["client_secret"] = _read_secret(GRAPH_SECRET_SERVICE, GRAPH_SECRET_KEY)
 
     paths = _section(config, "paths")
     paths["hearings_root"] = _path(_text(paths, "hearings_root", "paths"))

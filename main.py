@@ -3,6 +3,11 @@
     python main.py <spreadsheet.xlsx>             search everyone
     python main.py <spreadsheet.xlsx> --limit 3   search the first 3 only
     python main.py <spreadsheet.xlsx> --check     read the sheet only, no CCIS
+    python main.py --email                        use today's booking email
+    python main.py --email --check                fetch it and read it, no CCIS
+
+--email saves the spreadsheet as logs/YYYY-MM-DD.xlsx, beside that day's
+log, and works from that copy. --limit works with either source.
 
 Console and log lines name spreadsheet rows, never people, so either is safe
 to paste. The PDFs themselves are named LAST_FIRST.pdf and go into
@@ -24,6 +29,7 @@ from config_loader import load_config
 from excel_reader import HEADER_SCAN_ROWS, SUFFIXES, Person, find_columns, read_people
 from exceptions import RowProblem, SystemProblem
 from folders import prepare_day_folder
+from graph_client import GraphClient
 from logger import get_logger, setup_logging
 
 # Anything outside these is replaced in file names. Windows refuses some
@@ -137,14 +143,48 @@ def search_people(
     return outcomes
 
 
-def run(path: Path, limit: int | None) -> int:
-    """Load config, read the sheet, search everyone ready, and print a summary."""
+def start() -> tuple[dict, date]:
+    """Load config and start the day's log. Returns the config and the run date.
+
+    One date serves the log, the email search and the day folder, so a run
+    that crosses midnight does not split across two days.
+    """
     config = load_config()
-    # One date for the log name and the day folder, so a run that crosses
-    # midnight does not split across two days.
     today = date.today()
     setup_logging(config["paths"]["logs"] / f"{today:%Y-%m-%d}.log")
+    return config, today
+
+
+def fetch_from_email(config: dict, today: date) -> Path:
+    """Download today's booking spreadsheet and save it beside today's log.
+
+    A rerun the same day overwrites the copy with the same email's sheet.
+    """
+    graph = config["graph"]
+    client = GraphClient(
+        graph["tenant_id"], graph["client_id"], graph["client_secret"], graph["mailbox"]
+    )
+    content = client.fetch_booking_sheet(today, graph["sender"], graph["subject_contains"])
+    path = config["paths"]["logs"] / f"{today:%Y-%m-%d}.xlsx"
+    try:
+        path.write_bytes(content)
+    except OSError as error:
+        raise SystemProblem(
+            f"Could not save the emailed spreadsheet: {type(error).__name__}"
+        ) from error
+    get_logger().info("Spreadsheet saved beside today's log")
+    return path
+
+
+def run(path: Path | None, limit: int | None) -> int:
+    """Load config, read the sheet, search everyone ready, and print a summary.
+
+    With no path, the sheet comes from today's booking email.
+    """
+    config, today = start()
     log = get_logger()
+    if path is None:
+        path = fetch_from_email(config, today)
 
     people = read_people(path)
     ready = [p for p in people if not p.problem]
@@ -179,12 +219,16 @@ def run(path: Path, limit: int | None) -> int:
 def main() -> int:
     """Parse the command line and run, turning a SystemProblem into exit code 1."""
     parser = argparse.ArgumentParser(description="Search CCIS for everyone on a booking sheet.")
-    parser.add_argument("spreadsheet", type=Path)
+    parser.add_argument("spreadsheet", type=Path, nargs="?")
+    parser.add_argument("--email", action="store_true", help="use today's booking email")
     parser.add_argument("--limit", type=int, help="search only the first N ready people")
     parser.add_argument("--check", action="store_true", help="read the sheet only, no CCIS")
     args = parser.parse_args()
 
-    if not args.spreadsheet.is_file():
+    if args.email == (args.spreadsheet is not None):
+        print("Give a spreadsheet or --email, one or the other.")
+        return 2
+    if args.spreadsheet is not None and not args.spreadsheet.is_file():
         print("File not found.")
         return 2
     if args.limit is not None and args.limit < 1:
@@ -193,8 +237,11 @@ def main() -> int:
 
     try:
         if args.check:
-            describe_layout(args.spreadsheet)
-            describe_people(read_people(args.spreadsheet))
+            path = args.spreadsheet
+            if args.email:
+                path = fetch_from_email(*start())
+            describe_layout(path)
+            describe_people(read_people(path))
             return 0
         return run(args.spreadsheet, args.limit)
     except SystemProblem as error:

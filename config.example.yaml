@@ -30,6 +30,26 @@ ccis:
   # locators:
   #   last_name_field: "search_tab:personForm:lastname"
 
+graph:
+  # The Microsoft Graph app registration, shared with PROJECT-DALYN.
+  # Identifiers only: the client secret is read from Windows Credential
+  # Manager, where DALYN's set_credentials.py stores it.
+  tenant_id: "PASTE-TENANT-ID"
+  client_id: "PASTE-CLIENT-ID"
+
+  # The mailbox HRS reads the daily booking email from. It must receive its
+  # own copy of the email, for example as a member of the distribution group;
+  # a group itself has no mailbox to read. Only its Inbox is read, and the
+  # email is never marked read or moved.
+  mailbox: "mailbox@example.com"
+
+  # The booking email is the one received today in that Inbox from this
+  # sender, with this phrase somewhere in its subject (case ignored). Exactly
+  # one such email with exactly one .xlsx attached is required; anything
+  # else stops the run.
+  sender: "sender@example.com"
+  subject_contains: "PASTE-SUBJECT-PHRASE"
+
 paths:
   # The folder that holds one folder per day (mm.dd.yyyy), each with
   # Affidavit, CCIS, PTR and VIC inside. PDFs go into CCIS. Relative to the
