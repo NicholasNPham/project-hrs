@@ -114,7 +114,7 @@ def load_config(path: Path = CONFIG_PATH) -> dict:
     ccis["username"], ccis["password"] = _read_login(ccis["credential_entry"])
 
     paths = _section(config, "paths")
-    paths["pdfs"] = _path(_text(paths, "pdfs", "paths"))
+    paths["hearings_root"] = _path(_text(paths, "hearings_root", "paths"))
     paths["logs"] = _path(_text(paths, "logs", "paths"))
     chromedriver = _text(paths, "chromedriver", "paths", allow_blank=True)
     paths["chromedriver"] = _path(chromedriver) if chromedriver else None

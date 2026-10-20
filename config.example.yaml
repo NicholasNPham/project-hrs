@@ -31,9 +31,15 @@ ccis:
   #   last_name_field: "search_tab:personForm:lastname"
 
 paths:
-  # Where PDFs are saved, relative to the project root unless absolute.
-  # test/ is gitignored. This becomes the network drive later.
-  pdfs: "test"
+  # The folder that holds one folder per day (mm.dd.yyyy), each with
+  # Affidavit, CCIS, PTR and VIC inside. PDFs go into CCIS. Relative to the
+  # project root unless absolute. It must already exist; HRS stops rather
+  # than create it, so a disconnected drive is caught. Use "test" (gitignored)
+  # for trial runs, and the network folder for real ones. A UNC path
+  # (\\server\share\...) keeps working when Task Scheduler runs HRS without
+  # your mapped drive letters. Put a Windows path in single quotes, as in
+  # 'G:\Folder'; double quotes treat each backslash as an escape.
+  hearings_root: "test"
   logs: "logs"
   # chromedriver.exe matching your Chrome. Leave "" to let Selenium find one,
   # or webdriver-manager download one.

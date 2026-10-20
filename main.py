@@ -5,8 +5,9 @@
     python main.py <spreadsheet.xlsx> --check     read the sheet only, no CCIS
 
 Console and log lines name spreadsheet rows, never people, so either is safe
-to paste. The PDFs themselves are named LAST_FIRST.pdf, so the folder they
-land in is gitignored.
+to paste. The PDFs themselves are named LAST_FIRST.pdf and go into
+<hearings_root>/<mm.dd.yyyy>/CCIS, so a trial root inside the project must
+be gitignored, as test/ is.
 """
 
 import argparse
@@ -22,6 +23,7 @@ from ccis import CcisSession
 from config_loader import load_config
 from excel_reader import HEADER_SCAN_ROWS, SUFFIXES, Person, find_columns, read_people
 from exceptions import RowProblem, SystemProblem
+from folders import prepare_day_folder
 from logger import get_logger, setup_logging
 
 # Anything outside these is replaced in file names. Windows refuses some
@@ -98,20 +100,16 @@ def pdf_name(person: Person, used: set[str]) -> str:
     return name
 
 
-def search_people(config: dict, people: list[Person]) -> dict[str, list[int]]:
-    """Search CCIS for each person and save their PDF.
+def search_people(
+    config: dict, people: list[Person], pdf_dir: Path
+) -> dict[str, list[int]]:
+    """Search CCIS for each person and save their PDF into pdf_dir.
 
     Returns the spreadsheet rows under each outcome. A RowProblem sends that
     person to "needs a look by hand" and the run carries on; a SystemProblem
     stops it.
     """
     log = get_logger()
-    pdf_dir: Path = config["paths"]["pdfs"]
-    try:
-        pdf_dir.mkdir(parents=True, exist_ok=True)
-    except OSError as error:
-        raise SystemProblem(f"Could not create the PDF folder: {error}") from error
-
     outcomes: dict[str, list[int]] = {HISTORY: [], NO_RESULTS: [], NEEDS_A_LOOK: []}
     used: set[str] = set()
     with CcisSession(config) as ccis:
@@ -142,7 +140,10 @@ def search_people(config: dict, people: list[Person]) -> dict[str, list[int]]:
 def run(path: Path, limit: int | None) -> int:
     """Load config, read the sheet, search everyone ready, and print a summary."""
     config = load_config()
-    setup_logging(config["paths"]["logs"] / f"{date.today():%Y-%m-%d}.log")
+    # One date for the log name and the day folder, so a run that crosses
+    # midnight does not split across two days.
+    today = date.today()
+    setup_logging(config["paths"]["logs"] / f"{today:%Y-%m-%d}.log")
     log = get_logger()
 
     people = read_people(path)
@@ -156,7 +157,12 @@ def run(path: Path, limit: int | None) -> int:
         ready = ready[:limit]
         log.info("Limited to the first %d ready", len(ready))
 
-    outcomes = search_people(config, ready)
+    # Before Chrome opens, so an unreachable drive stops the run without a
+    # wasted sign-in.
+    pdf_dir = prepare_day_folder(config["paths"]["hearings_root"], today)
+    log.info("Day folder ready")
+
+    outcomes = search_people(config, ready, pdf_dir)
 
     print()
     print(f"Searched:             {len(ready)}")
