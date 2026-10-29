@@ -5,9 +5,29 @@
     python main.py <spreadsheet.xlsx> --check     read the sheet only, no CCIS
     python main.py --email                        use today's booking email
     python main.py --email --check                fetch it and read it, no CCIS
+    python main.py --email --force                run again on a day already done
+    python main.py                                like --email, but asks first (double-click)
+    python main.py --setup                        store secrets, confirm the drive folder
+    python main.py --drive                        confirm or change the drive folder only
+
+Add --headless or --no-headless to any run to override ccis.headless for
+that run only; config.yaml is not changed.
+
+With no arguments, as when HRS.exe is double-clicked, HRS is run by a person
+at the screen: it offers setup if this Windows user has no secrets stored,
+shows where PDFs will go with a chance to change it, and waits for Enter
+before closing so the summary can be read. Every other run
+never asks anything, so a scheduled task given --email cannot hang on a
+prompt. Task Scheduler can show a console window, so whether someone is
+there is decided by the arguments, not by whether a console exists.
+
+A full --email run writes "HRS complete.txt" into the day folder, and later
+--email runs that day stop at once. Only one HRS runs at a time per computer.
 
 --email saves the spreadsheet as logs/YYYY-MM-DD.xlsx, beside that day's
-log, and works from that copy. --limit works with either source.
+log, and works from that copy. If today's email has not arrived, it checks
+again every graph.check_every_minutes until graph.check_until, then stops.
+--limit works with either source.
 
 Console and log lines name spreadsheet rows, never people, so either is safe
 to paste. The PDFs themselves are named LAST_FIRST.pdf and go into
@@ -18,19 +38,26 @@ be gitignored, as test/ is.
 import argparse
 import re
 import sys
+import time
+import traceback
 from collections import Counter
-from datetime import date
+from collections.abc import Callable
+from datetime import date, datetime, timedelta
+from datetime import time as clock
 from pathlib import Path
 
 from openpyxl import load_workbook
 
 from ccis import CcisSession
-from config_loader import load_config
+from config_loader import APP_ROOT, CONFIG_PATH, load_config
+from credentials import MissingCredentials, run_setup
+from drive_setting import change_drive, confirm_drive
 from excel_reader import HEADER_SCAN_ROWS, SUFFIXES, Person, find_columns, read_people
-from exceptions import RowProblem, SystemProblem
-from folders import prepare_day_folder
-from graph_client import GraphClient
+from exceptions import ConfigProblem, RowProblem, SystemProblem
+from folders import check_root, day_folder, prepare_day_folder
+from graph_client import EmailNotArrived, GraphClient
 from logger import get_logger, setup_logging
+from run_guard import finished_today, mark_finished, single_run
 
 # Anything outside these is replaced in file names. Windows refuses some
 # characters outright, and a stray one would fail the write for that person.
@@ -143,28 +170,90 @@ def search_people(
     return outcomes
 
 
-def start() -> tuple[dict, date]:
+def start(interactive: bool = False, headless: bool | None = None) -> tuple[dict, date]:
     """Load config and start the day's log. Returns the config and the run date.
 
     One date serves the log, the email search and the day folder, so a run
     that crosses midnight does not split across two days.
+
+    When interactive, missing secrets start setup instead of stopping, and
+    the drive folder is shown for the person to confirm or change. Both
+    happen before logging starts, so the folder never reaches the log.
+    headless, when given, replaces ccis.headless for this run only.
     """
-    config = load_config()
+    try:
+        config = load_config()
+    except MissingCredentials as error:
+        if not interactive:
+            raise
+        print(error)
+        print("Starting setup.")
+        run_setup()
+        config = load_config()
+    if interactive and confirm_drive(config["paths"]["hearings_root"], CONFIG_PATH, APP_ROOT):
+        config = load_config()
+    # After every load above, so a reload cannot undo it.
+    if headless is not None:
+        config["ccis"]["headless"] = headless
     today = date.today()
     setup_logging(config["paths"]["logs"] / f"{today:%Y-%m-%d}.log")
     return config, today
 
 
+def wait_for_email(
+    fetch: Callable[[], bytes],
+    today: date,
+    until: clock,
+    every: timedelta,
+    now: Callable[[], datetime] = datetime.now,
+    sleep: Callable[[float], None] = time.sleep,
+) -> bytes:
+    """Call fetch until the email has arrived or until today at `until`.
+
+    Only EmailNotArrived is waited out; every other problem stops at once.
+    The last wait is cut short so one final check lands on the deadline
+    itself, rather than giving up early because a full wait would overrun
+    it. Started after the deadline, it checks once.
+
+    Raises:
+        SystemProblem: If no email has arrived by the deadline, or fetch
+            fails any other way.
+    """
+    log = get_logger()
+    deadline = datetime.combine(today, until)
+    while True:
+        try:
+            return fetch()
+        except EmailNotArrived as error:
+            remaining = deadline - now()
+            if remaining <= timedelta(0):
+                # The last check's reason says which setting to look at.
+                raise SystemProblem(
+                    f"No booking email arrived by {until:%H:%M}. Nothing was searched. "
+                    f"{error}"
+                ) from error
+            wait = min(every, remaining)
+            log.info("No booking email yet, checking again at %s",
+                     f"{now() + wait:%H:%M}")
+            sleep(wait.total_seconds())
+
+
 def fetch_from_email(config: dict, today: date) -> Path:
     """Download today's booking spreadsheet and save it beside today's log.
 
-    A rerun the same day overwrites the copy with the same email's sheet.
+    Waits for the email as set in config. A rerun the same day overwrites
+    the copy with the same email's sheet.
     """
     graph = config["graph"]
     client = GraphClient(
         graph["tenant_id"], graph["client_id"], graph["client_secret"], graph["mailbox"]
     )
-    content = client.fetch_booking_sheet(today, graph["sender"], graph["subject_contains"])
+    content = wait_for_email(
+        lambda: client.fetch_booking_sheet(today, graph["sender"], graph["subject_contains"]),
+        today,
+        graph["check_until"],
+        timedelta(minutes=graph["check_every_minutes"]),
+    )
     path = config["paths"]["logs"] / f"{today:%Y-%m-%d}.xlsx"
     try:
         path.write_bytes(content)
@@ -176,14 +265,45 @@ def fetch_from_email(config: dict, today: date) -> Path:
     return path
 
 
-def run(path: Path | None, limit: int | None) -> int:
+def run(
+    path: Path | None,
+    limit: int | None,
+    force: bool = False,
+    interactive: bool = False,
+    headless: bool | None = None,
+) -> int:
     """Load config, read the sheet, search everyone ready, and print a summary.
 
-    With no path, the sheet comes from today's booking email.
+    With no path, the sheet comes from today's booking email, and the run
+    is guarded so each day is searched once: a day already marked done is
+    skipped unless force is set, and only a full email run marks it done.
+    A run from a local file is never skipped and never marks the day,
+    since that file may not be today's sheet.
     """
-    config, today = start()
+    config, today = start(interactive, headless)
+    with single_run(config["paths"]["logs"]):
+        return _guarded_run(config, today, path, limit, force)
+
+
+def _guarded_run(
+    config: dict, today: date, path: Path | None, limit: int | None, force: bool
+) -> int:
+    """The body of run, inside the lock."""
     log = get_logger()
-    if path is None:
+    root = config["paths"]["hearings_root"]
+    # Before the email wait, so a dropped drive is reported at 5:30, not 9:00.
+    check_root(root)
+    folder = day_folder(root, today)
+    from_email = path is None
+
+    if from_email and finished_today(folder):
+        if not force:
+            log.info("Already ran today. Next run is tomorrow. "
+                     "Use --force to run today again.")
+            return 0
+        log.warning("Today is already marked done; running again because of --force")
+
+    if from_email:
         path = fetch_from_email(config, today)
 
     people = read_people(path)
@@ -213,17 +333,127 @@ def run(path: Path | None, limit: int | None) -> int:
     print(f"Flagged, not searched: {len(flagged)}")
     for person in flagged:
         print(f"  row {person.row}: {person.problem}")
+
+    # A --limit run searched only some people, so the day is not done.
+    if from_email and limit is None:
+        counts = ", ".join(f"{outcome} {len(rows)}" for outcome, rows in outcomes.items())
+        mark_finished(
+            folder,
+            f"Searched {len(ready)}: {counts}. Flagged, not searched: {len(flagged)}.",
+            datetime.now(),
+        )
+        log.info("Today marked done")
     return 0
 
 
-def main() -> int:
+def setup() -> int:
+    """Store secrets, confirm the drive folder, then check that everything loads.
+
+    Returns 0 when config.yaml and the secrets are complete, 1 when
+    something is still missing, so a person setting up a new computer is
+    told what is left rather than finding out at 5:30 the next morning.
+    """
+    run_setup()
+    print()
+    try:
+        change_drive(CONFIG_PATH, APP_ROOT)
+    except ConfigProblem as error:
+        print(f"Drive folder not set: {error}")
+    print()
+    try:
+        load_config()
+    except ConfigProblem as error:
+        print(f"Still to fix: {error}")
+        return 1
+    print("config.yaml and the secrets are complete.")
+    return 0
+
+
+def pause_before_closing() -> None:
+    """Wait for Enter, so a double-clicked window does not vanish with the summary."""
+    try:
+        input("\nPress Enter to close.")
+    except (KeyboardInterrupt, EOFError):
+        pass
+
+
+def report_stop(message: str) -> None:
+    """Show why the run stopped, and put it in today's log once there is one.
+
+    A scheduled run has nobody watching its window, so the log is the only
+    place the reason survives. Stops before logging starts, such as a bad
+    config.yaml, can only be printed; --setup reports those.
+    """
+    log = get_logger()
+    if log.handlers:
+        # The log's console handler prints it too.
+        log.error(message)
+    else:
+        print(message)
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Run the command line, pausing at the end when someone double-clicked."""
+    argv = sys.argv[1:] if argv is None else argv
+    # Double-clicked: a person is at the screen to answer and to read the end.
+    interactive = not argv and sys.stdin.isatty()
+    try:
+        code = _command(argv, interactive)
+    except Exception as error:
+        # Only the type and the place go in the log. The message of an
+        # unexpected error was never checked for what it might quote.
+        where = traceback.extract_tb(error.__traceback__)[-1]
+        report_stop(
+            f"Stopped on an unexpected {type(error).__name__} at "
+            f"{Path(where.filename).name}:{where.lineno}"
+        )
+        # A scheduled run lets the traceback through, so the task shows a
+        # failure. A double-clicked one shows it and waits, since the window
+        # would otherwise close before anyone could read it.
+        if not interactive:
+            raise
+        traceback.print_exc()
+        code = 1
+    if interactive:
+        pause_before_closing()
+    return code
+
+
+def _command(argv: list[str], interactive: bool) -> int:
     """Parse the command line and run, turning a SystemProblem into exit code 1."""
     parser = argparse.ArgumentParser(description="Search CCIS for everyone on a booking sheet.")
     parser.add_argument("spreadsheet", type=Path, nargs="?")
     parser.add_argument("--email", action="store_true", help="use today's booking email")
     parser.add_argument("--limit", type=int, help="search only the first N ready people")
     parser.add_argument("--check", action="store_true", help="read the sheet only, no CCIS")
-    args = parser.parse_args()
+    parser.add_argument("--force", action="store_true", help="run again on a day already done")
+    parser.add_argument("--setup", action="store_true",
+                        help="store secrets and confirm the drive folder")
+    parser.add_argument("--drive", action="store_true",
+                        help="confirm or change the drive folder")
+    parser.add_argument("--headless", action=argparse.BooleanOptionalAction,
+                        help="override ccis.headless for this run only")
+    args = parser.parse_args(argv)
+
+    if args.setup or args.drive:
+        if len(argv) != 1:
+            print("--setup and --drive are used on their own.")
+            return 2
+        try:
+            if args.setup:
+                return setup()
+            change_drive(CONFIG_PATH, APP_ROOT)
+            return 0
+        except SystemProblem as error:
+            print(f"Stopped: {error}")
+            return 1
+        except (KeyboardInterrupt, EOFError):
+            print("\nCancelled.")
+            return 1
+
+    # Double-clicked: today's email is the source.
+    if not argv:
+        args.email = True
 
     if args.email == (args.spreadsheet is not None):
         print("Give a spreadsheet or --email, one or the other.")
@@ -234,6 +464,9 @@ def main() -> int:
     if args.limit is not None and args.limit < 1:
         print("--limit must be 1 or more.")
         return 2
+    if args.force and not args.email:
+        print("--force only applies to --email runs.")
+        return 2
 
     try:
         if args.check:
@@ -243,9 +476,13 @@ def main() -> int:
             describe_layout(path)
             describe_people(read_people(path))
             return 0
-        return run(args.spreadsheet, args.limit)
+        return run(args.spreadsheet, args.limit, args.force, interactive, args.headless)
     except SystemProblem as error:
-        print(f"Stopped: {error}")
+        report_stop(f"Stopped: {error}")
+        return 1
+    except (KeyboardInterrupt, EOFError):
+        print()
+        report_stop("Cancelled.")
         return 1
 
 

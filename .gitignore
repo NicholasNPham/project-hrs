@@ -47,6 +47,12 @@ ENV/
 .mypy_cache/
 .ruff_cache/
 
+# PyInstaller output from build.bat. dist\HRS\ may also end up holding a
+# copied config.yaml and logs\ while testing the exe.
+build/
+dist/
+*.spec
+
 # ----------------------------------------------------------------- editors
 .idea/
 .vscode/

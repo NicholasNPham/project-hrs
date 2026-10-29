@@ -17,6 +17,25 @@ SUBFOLDERS = ("Affidavit", CCIS_FOLDER, "PTR", "VIC")
 DATE_FOLDER_FORMAT = "%m.%d.%Y"
 
 
+def check_root(root: Path) -> None:
+    """Raise if the hearings folder is not there, without creating anything.
+
+    Called at the start of a run as well as before the folders are made, so
+    a disconnected drive is caught before hours of waiting for the email.
+    """
+    # The path is left out of messages because they reach the console and logs.
+    if not root.is_dir():
+        raise SystemProblem(
+            "The hearings folder in config.yaml cannot be reached. "
+            "Check that the drive is connected."
+        )
+
+
+def day_folder(root: Path, day: date) -> Path:
+    """Return the path of the day's folder, without creating it."""
+    return root / day.strftime(DATE_FOLDER_FORMAT)
+
+
 def prepare_day_folder(root: Path, day: date) -> Path:
     """Create root/<date>/ with its four subfolders and return the CCIS folder.
 
@@ -25,18 +44,13 @@ def prepare_day_folder(root: Path, day: date) -> Path:
     would hide a disconnected or mistyped drive by building a new tree in the
     wrong place.
     """
-    # The path is left out of messages because they reach the console and logs.
-    if not root.is_dir():
-        raise SystemProblem(
-            "The hearings folder in config.yaml cannot be reached. "
-            "Check that the drive is connected."
-        )
-    day_folder = root / day.strftime(DATE_FOLDER_FORMAT)
+    check_root(root)
+    folder = day_folder(root, day)
     try:
         for name in SUBFOLDERS:
-            (day_folder / name).mkdir(parents=True, exist_ok=True)
+            (folder / name).mkdir(parents=True, exist_ok=True)
     except OSError as error:
         raise SystemProblem(
             f"Could not create today's folders: {type(error).__name__}"
         ) from error
-    return day_folder / CCIS_FOLDER
+    return folder / CCIS_FOLDER

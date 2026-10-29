@@ -1,26 +1,28 @@
-"""Read config.yaml and the CCIS login, and refuse anything missing.
+"""Read config.yaml and HRS's secrets, and refuse anything missing.
 
 There are no defaults on purpose: a missing or placeholder setting stops the
-run at startup, not halfway through a list of people. The login comes from
-Windows Credential Manager, never from the file.
+run at startup, not halfway through a list of people. Secrets come from
+Windows Credential Manager through credentials.py, never from the file.
 """
 
+import sys
+from datetime import datetime
+from datetime import time as clock
 from pathlib import Path
 
-import keyring
 import yaml
-from keyring.errors import KeyringError
 
+from credentials import load_credentials
 from exceptions import ConfigProblem
 
-PROJECT_ROOT = Path(__file__).resolve().parent
-CONFIG_PATH = PROJECT_ROOT / "config.yaml"
-
-# The Credential Manager entry PROJECT-DALYN keeps its Graph client secret
-# under. HRS signs in as the same app, so it reads the same entry and a new
-# secret is set in one place.
-GRAPH_SECRET_SERVICE = "DALYN"
-GRAPH_SECRET_KEY = "graph_client_secret"
+# Built as HRS.exe, the code runs from PyInstaller's bundle, not from a folder
+# anyone edits. config.yaml, logs and a relative hearings_root belong beside
+# the exe instead, where the person who installed it can find them.
+if getattr(sys, "frozen", False):
+    APP_ROOT = Path(sys.executable).resolve().parent
+else:
+    APP_ROOT = Path(__file__).resolve().parent
+CONFIG_PATH = APP_ROOT / "config.yaml"
 
 # Values config.example.yaml ships with. Seeing one means config.yaml was
 # copied but not filled in.
@@ -33,6 +35,13 @@ PLACEHOLDERS = frozenset({
     "PASTE-CLIENT-ID",
     "PASTE-SUBJECT-PHRASE",
 })
+
+# Settings that moved to Credential Manager or were dropped. Seeing one means
+# an old config.yaml, which would otherwise suggest it still does something.
+RETIRED = {
+    "ccis": ("username", "password", "credential_entry"),
+    "graph": ("client_secret",),
+}
 
 
 def _section(config: dict, name: str) -> dict:
@@ -69,42 +78,22 @@ def _flag(section: dict, key: str, where: str) -> bool:
     return value
 
 
+def _time_of_day(section: dict, key: str, where: str) -> clock:
+    """Return a setting that must be a quoted 24-hour time such as "09:00"."""
+    value = section.get(key)
+    # Unquoted, YAML reads 10:30 as the number 630, so only a string is taken.
+    if isinstance(value, str):
+        try:
+            return datetime.strptime(value.strip(), "%H:%M").time()
+        except ValueError:
+            pass
+    raise ConfigProblem(f'{where}.{key} must be a 24-hour time in quotes, like "09:00".')
+
+
 def _path(value: str) -> Path:
-    """Resolve a path from config against the project root."""
+    """Resolve a path from config against the folder HRS runs from."""
     path = Path(value)
-    return path if path.is_absolute() else PROJECT_ROOT / path
-
-
-def _read_login(entry: str) -> tuple[str, str]:
-    """Read the username and password stored under one Credential Manager entry."""
-    try:
-        credential = keyring.get_credential(entry, None)
-    except KeyringError as error:
-        raise ConfigProblem(
-            f"Could not read '{entry}' from Windows Credential Manager: {error}"
-        ) from error
-    if credential is None or not credential.username or not credential.password:
-        raise ConfigProblem(
-            f"No login stored under '{entry}' in Windows Credential Manager. "
-            "Run Project-Rap-Sheet's store_secret.py as this Windows account."
-        )
-    return credential.username, credential.password
-
-
-def _read_secret(service: str, key: str) -> str:
-    """Read one secret stored under service/key in Windows Credential Manager."""
-    try:
-        secret = keyring.get_password(service, key)
-    except KeyringError as error:
-        raise ConfigProblem(
-            f"Could not read '{service}/{key}' from Windows Credential Manager: {error}"
-        ) from error
-    if not secret or not secret.strip():
-        raise ConfigProblem(
-            f"No secret stored under '{service}/{key}' in Windows Credential Manager. "
-            "Run PROJECT-DALYN's set_credentials.py as this Windows account."
-        )
-    return secret
+    return path if path.is_absolute() else APP_ROOT / path
 
 
 def _address(section: dict, key: str, where: str) -> str:
@@ -117,16 +106,22 @@ def _address(section: dict, key: str, where: str) -> str:
 
 
 def load_config(path: Path = CONFIG_PATH) -> dict:
-    """Read and validate config.yaml, and add the CCIS login from Credential Manager.
+    """Read and validate config.yaml, and add the secrets from Credential Manager.
 
     Returns the config with ccis.username, ccis.password and
-    graph.client_secret filled in from Credential Manager, every
-    setting checked, and paths resolved to absolute Path objects.
+    graph.client_secret filled in, every setting checked, and paths resolved
+    to absolute Path objects. The file is checked before Credential Manager,
+    so a broken config.yaml is reported even on a computer with no secrets.
+
+    Raises:
+        credentials.MissingCredentials: If secrets are not stored for this
+            Windows user, so the caller can offer setup.
+        ConfigProblem: For anything else wrong.
     """
     if not path.is_file():
         raise ConfigProblem(
             f"No config file at {path}. Copy config.example.yaml to config.yaml "
-            "and fill it in."
+            "in that folder and fill it in."
         )
     try:
         config = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
@@ -135,15 +130,19 @@ def load_config(path: Path = CONFIG_PATH) -> dict:
     if not isinstance(config, dict):
         raise ConfigProblem("config.yaml does not hold a YAML mapping.")
 
+    for name, keys in RETIRED.items():
+        section = config.get(name)
+        leftovers = [
+            f"{name}.{key}" for key in keys if isinstance(section, dict) and key in section
+        ]
+        if leftovers:
+            raise ConfigProblem(
+                f"{' and '.join(leftovers)} is in config.yaml but no longer used. "
+                "Secrets are stored with HRS --setup; delete those lines."
+            )
+
     ccis = _section(config, "ccis")
-    leftovers = [key for key in ("username", "password") if key in ccis]
-    if leftovers:
-        raise ConfigProblem(
-            f"ccis.{' and '.join(leftovers)} is in config.yaml. Logins live in "
-            "Windows Credential Manager; delete those lines."
-        )
     ccis["url"] = _text(ccis, "url", "ccis").rstrip("/")
-    ccis["credential_entry"] = _text(ccis, "credential_entry", "ccis")
     ccis["headless"] = _flag(ccis, "headless", "ccis")
     for key in ("wait_timeout", "no_results_wait_timeout", "pause_between_actions"):
         ccis[key] = _number(ccis, key, "ccis")
@@ -151,19 +150,16 @@ def load_config(path: Path = CONFIG_PATH) -> dict:
     if not isinstance(locators, dict):
         raise ConfigProblem("ccis.locators must be a mapping of name to locator.")
     ccis["locators"] = locators
-    ccis["username"], ccis["password"] = _read_login(ccis["credential_entry"])
 
     graph = _section(config, "graph")
-    if "client_secret" in graph:
-        raise ConfigProblem(
-            "graph.client_secret is in config.yaml. The secret lives in Windows "
-            "Credential Manager; delete that line."
-        )
     for key in ("tenant_id", "client_id", "subject_contains"):
         graph[key] = _text(graph, key, "graph")
     graph["mailbox"] = _address(graph, "mailbox", "graph")
     graph["sender"] = _address(graph, "sender", "graph")
-    graph["client_secret"] = _read_secret(GRAPH_SECRET_SERVICE, GRAPH_SECRET_KEY)
+    graph["check_until"] = _time_of_day(graph, "check_until", "graph")
+    graph["check_every_minutes"] = _number(graph, "check_every_minutes", "graph")
+    if graph["check_every_minutes"] < 1:
+        raise ConfigProblem("graph.check_every_minutes must be 1 or more.")
 
     paths = _section(config, "paths")
     paths["hearings_root"] = _path(_text(paths, "hearings_root", "paths"))
@@ -171,4 +167,8 @@ def load_config(path: Path = CONFIG_PATH) -> dict:
     chromedriver = _text(paths, "chromedriver", "paths", allow_blank=True)
     paths["chromedriver"] = _path(chromedriver) if chromedriver else None
 
+    secrets = load_credentials()
+    ccis["username"] = secrets["ccis_username"]
+    ccis["password"] = secrets["ccis_password"]
+    graph["client_secret"] = secrets["graph_client_secret"]
     return config

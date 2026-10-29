@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import graph_client  # noqa: E402
 from exceptions import SystemProblem  # noqa: E402
-from graph_client import MAX_PAGES, MAX_RETRIES, GraphClient  # noqa: E402
+from graph_client import MAX_PAGES, MAX_RETRIES, EmailNotArrived, GraphClient  # noqa: E402
 from logger import get_logger  # noqa: E402
 
 MAILBOX = "mailbox@example.com"
@@ -183,20 +183,61 @@ def test_other_subjects_from_the_sender_are_ignored(monkeypatch: pytest.MonkeyPa
     assert session.calls[1][0].endswith("/messages/m1/attachments")
 
 
-def test_no_matching_email_stops(monkeypatch: pytest.MonkeyPatch) -> None:
-    """No email today is a stop, not an empty run."""
+def test_no_matching_email_is_not_arrived(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Mail from the sender without the phrase says the subject is the mismatch."""
     client, _, _ = _client(monkeypatch, [_listing(_message("m0", subject="Something else"))])
 
-    with pytest.raises(SystemProblem, match="found 0"):
+    with pytest.raises(
+        EmailNotArrived, match=r"1 email\(s\) from graph.sender .* none with graph.subject_contains"
+    ) as caught:
+        _fetch(client)
+    assert "Something else" not in str(caught.value)
+
+
+def test_empty_inbox_is_not_arrived(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Nothing from the sender today points at the sender or the folder."""
+    client, _, _ = _client(monkeypatch, [_listing()])
+
+    with pytest.raises(EmailNotArrived, match="No email from graph.sender in the Inbox on 01/05/2026"):
         _fetch(client)
 
 
-def test_two_matching_emails_stop(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A resend is not guessed between."""
+def test_not_arrived_still_stops_callers_that_do_not_wait() -> None:
+    """Code that only catches SystemProblem still stops on it."""
+    assert issubclass(EmailNotArrived, SystemProblem)
+
+
+def test_two_matching_emails_stop_for_good(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A resend is not guessed between, and is not something to wait out."""
     client, _, _ = _client(monkeypatch, [_listing(_message("m1"), _message("m2"))])
 
-    with pytest.raises(SystemProblem, match="found 2"):
+    with pytest.raises(SystemProblem, match="found 2") as caught:
         _fetch(client)
+    assert not isinstance(caught.value, EmailNotArrived)
+
+
+@pytest.mark.parametrize("attachments", [
+    _attachments(),
+    _attachments(_file("a.xlsx"), _file("b.xlsx")),
+    _attachments(_file("bookings.xlsx", content=b"")),
+])
+def test_attachment_problems_are_not_waited_out(monkeypatch: pytest.MonkeyPatch, attachments: FakeResponse) -> None:
+    """The email is there, so a bad attachment stops rather than waits."""
+    client, _, _ = _client(monkeypatch, [_listing(_message("m1")), attachments])
+
+    with pytest.raises(SystemProblem) as caught:
+        _fetch(client)
+    assert not isinstance(caught.value, EmailNotArrived)
+
+
+@pytest.mark.parametrize("status", [401, 403, 404, 500])
+def test_graph_errors_are_not_waited_out(monkeypatch: pytest.MonkeyPatch, status: int) -> None:
+    """A permission or mailbox problem will not fix itself by 9:00."""
+    client, _, _ = _client(monkeypatch, [FakeResponse(status)])
+
+    with pytest.raises(SystemProblem) as caught:
+        _fetch(client)
+    assert not isinstance(caught.value, EmailNotArrived)
 
 
 def test_paging_follows_next_link_without_resending_params(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -334,6 +375,33 @@ def test_refused_token_names_the_error_code_only(monkeypatch: pytest.MonkeyPatch
         _fetch(client)
     assert "secret detail" not in str(caught.value)
     assert session.calls == []
+
+
+def test_refused_token_explains_a_wrong_secret(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The AADSTS code is pulled out and explained; the ids around it are not."""
+    description = (
+        "AADSTS7000215: Invalid client secret provided. Ensure the secret being sent "
+        "is the client secret value, not the client secret ID, for a secret added to "
+        "app 'FAKE-CLIENT-ID'. Trace ID: FAKE-TRACE"
+    )
+    client, _, _ = _client(
+        monkeypatch, [], token={"error": "invalid_client", "error_description": description}
+    )
+
+    with pytest.raises(SystemProblem, match=r"invalid_client \(AADSTS7000215\): the client secret is wrong") as caught:
+        _fetch(client)
+    for detail in ("FAKE-CLIENT-ID", "FAKE-TRACE"):
+        assert detail not in str(caught.value)
+
+
+def test_unknown_aadsts_code_is_still_shown(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A code without an explanation is passed on for looking up."""
+    client, _, _ = _client(
+        monkeypatch, [], token={"error": "invalid_request", "error_description": "AADSTS12345: something"}
+    )
+
+    with pytest.raises(SystemProblem, match=r"invalid_request \(AADSTS12345\)$"):
+        _fetch(client)
 
 
 # What reaches the console and logs

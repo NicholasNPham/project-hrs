@@ -1,19 +1,21 @@
-# Copy to config.yaml and fill in. config.yaml is gitignored; never commit it.
-# Every setting below is required. A missing or placeholder value stops the
-# run at startup, before Chrome opens.
+# Copy to config.yaml beside HRS.exe (or main.py) and fill in. config.yaml is
+# gitignored; never commit it. Every setting below is required. A missing or
+# placeholder value stops the run at startup, before Chrome opens.
+#
+# No passwords or secrets go in this file. Run HRS with --setup once per
+# computer, signed in as the Windows account that will run it, and it stores
+# the CCIS login and the Graph client secret in Windows Credential Manager.
 
 ccis:
   # The CCIS sign-in page.
   url: "https://ccis.example.com"
 
-  # The Windows Credential Manager entry holding the CCIS login. Shared with
-  # Project-Rap-Sheet, so a password change is made in one place. Logins are
-  # never put in this file; a username or password here is refused.
-  credential_entry: "rap-sheet-ccis"
-
   # true runs Chrome with no window. The window is fixed at 1920x1080 in that
   # mode, because the PDF is rendered from the page and a narrower viewport
-  # changes what it looks like. Leave false while testing so you can watch.
+  # changes what it looks like. false is the safer default: CCIS has been
+  # finicky headless. With false, a scheduled task must run "only when user
+  # is logged on" so Chrome has a screen; a locked screen is fine. Override
+  # for one run with --headless or --no-headless.
   headless: false
 
   # Seconds. Carried over from Rap-Sheet and venire, where they are proven.
@@ -32,8 +34,7 @@ ccis:
 
 graph:
   # The Microsoft Graph app registration, shared with PROJECT-DALYN.
-  # Identifiers only: the client secret is read from Windows Credential
-  # Manager, where DALYN's set_credentials.py stores it.
+  # Identifiers only: the client secret is stored by --setup.
   tenant_id: "PASTE-TENANT-ID"
   client_id: "PASTE-CLIENT-ID"
 
@@ -50,10 +51,17 @@ graph:
   sender: "sender@example.com"
   subject_contains: "PASTE-SUBJECT-PHRASE"
 
+  # When today's email is not there yet, check again every few minutes until
+  # this time, then stop. Only email received today counts. A 24-hour time
+  # in quotes: unquoted, YAML reads a time like 10:30 as a number. Keep
+  # these matching install_task.ps1's -Until and -EveryMinutes.
+  check_until: "08:00"
+  check_every_minutes: 10
+
 paths:
   # The folder that holds one folder per day (mm.dd.yyyy), each with
   # Affidavit, CCIS, PTR and VIC inside. PDFs go into CCIS. Relative to the
-  # project root unless absolute. It must already exist; HRS stops rather
+  # folder HRS runs from unless absolute. It must already exist; HRS stops rather
   # than create it, so a disconnected drive is caught. Use "test" (gitignored)
   # for trial runs, and the network folder for real ones. A UNC path
   # (\\server\share\...) keeps working when Task Scheduler runs HRS without

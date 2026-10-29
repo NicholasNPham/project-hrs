@@ -11,6 +11,7 @@ they reach the console and the logs.
 """
 
 import base64
+import re
 import time
 from datetime import date, datetime, timedelta, timezone
 from datetime import time as clock
@@ -33,12 +34,32 @@ FOLDER = "inbox"
 PAGE_SIZE = 50
 MAX_PAGES = 10
 
+# Microsoft's detail codes for a refused sign-in, in plain words. The code is
+# taken from the error description on its own, because the rest of the
+# description can quote the tenant and client ids.
+SIGN_IN_CODE = re.compile(r"AADSTS\d+")
+SIGN_IN_PROBLEMS = {
+    "AADSTS7000215": "the client secret is wrong. Store the secret's Value, "
+                     "not its Secret ID, with --setup",
+    "AADSTS7000222": "the client secret has expired. Make a new one in Entra "
+                     "and store it with --setup",
+    "AADSTS7000218": "no client secret was sent. Store it with --setup",
+    "AADSTS700016": "graph.client_id is not an app in this tenant. Check "
+                    "graph.client_id and graph.tenant_id in config.yaml",
+    "AADSTS90002": "graph.tenant_id is not a tenant Microsoft knows. Check "
+                   "it in config.yaml",
+}
+
 MAX_RETRIES = 5
 MAX_BACKOFF_SECONDS = 60
 
 # Microsoft is throttling or briefly down. Only GETs are ever sent, so any
 # of these is safe to repeat.
 RETRY_STATUSES = frozenset({429, 502, 503, 504})
+
+
+class EmailNotArrived(SystemProblem):
+    """No booking email yet today. The only Graph result worth checking again later."""
 
 
 class GraphClient:
@@ -79,11 +100,15 @@ class GraphClient:
             ) from error
         if "access_token" in result:
             return result["access_token"]
-        # The error code says what is wrong (for example invalid_client for a
-        # bad or expired secret) without echoing anything secret.
-        raise SystemProblem(
-            f"Microsoft refused the Graph sign-in: {result.get('error', 'unknown_error')}"
-        )
+        # invalid_client alone covers a wrong, expired or missing secret, so
+        # the AADSTS code is added to tell them apart.
+        message = f"Microsoft refused the Graph sign-in: {result.get('error', 'unknown_error')}"
+        code = SIGN_IN_CODE.search(str(result.get("error_description", "")))
+        if code:
+            message += f" ({code.group()})"
+            if code.group() in SIGN_IN_PROBLEMS:
+                message += f": {SIGN_IN_PROBLEMS[code.group()]}."
+        raise SystemProblem(message)
 
     def _get(self, url: str, params: dict | None = None) -> dict:
         """GET a Graph URL and return the JSON, retrying throttling and outages.
@@ -177,15 +202,29 @@ class GraphClient:
         sheet means searching the wrong people with no sign anything is off.
 
         Raises:
-            SystemProblem: If the email or attachment is missing or ambiguous,
-                or Graph fails.
+            EmailNotArrived: If no email matches yet. The caller may check again.
+            SystemProblem: If more than one email matches, the attachment is
+                missing or ambiguous, or Graph fails.
         """
         phrase = subject_phrase.casefold()
+        from_sender = self._messages_on(day, sender)
         matches = [
-            message for message in self._messages_on(day, sender)
+            message for message in from_sender
             if phrase in (message.get("subject") or "").casefold()
         ]
-        if len(matches) != 1:
+        # Counts only: which setting to look at, without quoting any email.
+        if not from_sender:
+            raise EmailNotArrived(
+                f"No email from graph.sender in the Inbox on {day:%m/%d/%Y}. If it "
+                "has come, check graph.sender, or whether a rule moved it out of the Inbox."
+            )
+        if not matches:
+            raise EmailNotArrived(
+                f"{len(from_sender)} email(s) from graph.sender in the Inbox on "
+                f"{day:%m/%d/%Y}, but none with graph.subject_contains in the subject."
+            )
+        # Two matches will not become one by waiting, so this stops for good.
+        if len(matches) > 1:
             raise SystemProblem(
                 f"Expected one booking email on {day:%m/%d/%Y}, found {len(matches)}. "
                 "Check the Inbox, or graph.sender and graph.subject_contains."

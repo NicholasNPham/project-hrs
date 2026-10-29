@@ -6,3 +6,5 @@ PyYAML
 msal
 requests
 pytest>=8.3
+# Builds HRS.exe with build.bat. Not needed to run from source.
+pyinstaller
