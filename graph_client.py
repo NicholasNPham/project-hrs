@@ -15,12 +15,21 @@ import re
 import time
 from datetime import date, datetime, timedelta, timezone
 from datetime import time as clock
+from typing import NamedTuple
 
 import msal
 import requests
 
 from exceptions import SystemProblem
 from logger import get_logger
+
+
+class BookingSheet(NamedTuple):
+    """The booking email's .xlsx: its file name as attached, and its bytes."""
+
+    name: str
+    content: bytes
+
 
 GRAPH_BASE_URL = "https://graph.microsoft.com/v1.0"
 GRAPH_SCOPE = ["https://graph.microsoft.com/.default"]
@@ -192,8 +201,8 @@ class GraphClient:
                 return messages
         raise SystemProblem(f"More than {MAX_PAGES} pages of mail from the sender in one day.")
 
-    def fetch_booking_sheet(self, day: date, sender: str, subject_phrase: str) -> bytes:
-        """Return the .xlsx attached to the day's booking email.
+    def fetch_booking_sheet(self, day: date, sender: str, subject_phrase: str) -> BookingSheet:
+        """Return the .xlsx attached to the day's booking email, with its name.
 
         The email must come from sender, be received on day (local time), and
         have subject_phrase in its subject, ignoring case. Exactly one such
@@ -244,5 +253,8 @@ class GraphClient:
         content = sheets[0].get("contentBytes")
         if not content:
             raise SystemProblem("Graph returned the .xlsx with no content.")
+        # The name comes from whoever sent the email and becomes a file name on
+        # the drive, so anything that reads as a folder is cut off.
+        name = re.split(r"[\\/]", sheets[0]["name"])[-1].strip()
         self._log.info("Booking email found, spreadsheet downloaded")
-        return base64.b64decode(content)
+        return BookingSheet(name, base64.b64decode(content))

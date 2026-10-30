@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import graph_client  # noqa: E402
 from exceptions import SystemProblem  # noqa: E402
-from graph_client import MAX_PAGES, MAX_RETRIES, EmailNotArrived, GraphClient  # noqa: E402
+from graph_client import MAX_PAGES, MAX_RETRIES, BookingSheet, EmailNotArrived, GraphClient  # noqa: E402
 from logger import get_logger  # noqa: E402
 
 MAILBOX = "mailbox@example.com"
@@ -112,7 +112,7 @@ def _attachments(*files: dict) -> FakeResponse:
     return FakeResponse(200, {"value": list(files)})
 
 
-def _fetch(client: GraphClient) -> bytes:
+def _fetch(client: GraphClient) -> BookingSheet:
     """Fetch the sheet with the test's day, sender and phrase."""
     return client.fetch_booking_sheet(DAY, SENDER, PHRASE)
 
@@ -121,14 +121,25 @@ def _fetch(client: GraphClient) -> bytes:
 
 
 def test_one_email_with_one_sheet_returns_its_bytes(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The happy path decodes the attachment."""
+    """The happy path decodes the attachment and keeps its name as sent."""
     client, session, _ = _client(monkeypatch, [
         _listing(_message("m1")),
-        _attachments(_file("bookings.xlsx")),
+        _attachments(_file("Copy of Bookings List.xlsx")),
     ])
 
-    assert _fetch(client) == SHEET
+    assert _fetch(client) == BookingSheet("Copy of Bookings List.xlsx", SHEET)
     assert session.calls[1][0].endswith("/messages/m1/attachments")
+
+
+@pytest.mark.parametrize("sent", [r"..\..\bookings.xlsx", "../bookings.xlsx", " sub/bookings.xlsx"])
+def test_a_name_that_reads_as_a_folder_is_cut_to_the_file(monkeypatch: pytest.MonkeyPatch, sent: str) -> None:
+    """The name becomes a file on the drive, so it cannot point anywhere else."""
+    client, _, _ = _client(monkeypatch, [
+        _listing(_message("m1")),
+        _attachments(_file(sent)),
+    ])
+
+    assert _fetch(client).name == "bookings.xlsx"
 
 
 def test_listing_asks_for_the_inbox_sender_and_whole_local_day(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -169,7 +180,7 @@ def test_subject_match_ignores_case(monkeypatch: pytest.MonkeyPatch) -> None:
         _attachments(_file("bookings.xlsx")),
     ])
 
-    assert _fetch(client) == SHEET
+    assert _fetch(client).content == SHEET
 
 
 def test_other_subjects_from_the_sender_are_ignored(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -179,7 +190,7 @@ def test_other_subjects_from_the_sender_are_ignored(monkeypatch: pytest.MonkeyPa
         _attachments(_file("bookings.xlsx")),
     ])
 
-    assert _fetch(client) == SHEET
+    assert _fetch(client).content == SHEET
     assert session.calls[1][0].endswith("/messages/m1/attachments")
 
 
@@ -248,7 +259,7 @@ def test_paging_follows_next_link_without_resending_params(monkeypatch: pytest.M
         _attachments(_file("bookings.xlsx")),
     ])
 
-    assert _fetch(client) == SHEET
+    assert _fetch(client).content == SHEET
     assert session.calls[1] == ("https://next.example/page2", None)
 
 
@@ -276,7 +287,7 @@ def test_only_real_xlsx_files_count(monkeypatch: pytest.MonkeyPatch) -> None:
         ),
     ])
 
-    assert _fetch(client) == SHEET
+    assert _fetch(client).content == SHEET
 
 
 def test_no_xlsx_stops(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -340,7 +351,7 @@ def test_throttling_is_retried_honoring_retry_after(monkeypatch: pytest.MonkeyPa
         _attachments(_file("bookings.xlsx")),
     ])
 
-    assert _fetch(client) == SHEET
+    assert _fetch(client).content == SHEET
     assert sleeps == [7, 2]
 
 

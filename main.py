@@ -37,6 +37,7 @@ be gitignored, as test/ is.
 
 import argparse
 import re
+import shutil
 import sys
 import time
 import traceback
@@ -55,7 +56,7 @@ from drive_setting import change_drive, confirm_drive
 from excel_reader import HEADER_SCAN_ROWS, SUFFIXES, Person, find_columns, read_people
 from exceptions import ConfigProblem, RowProblem, SystemProblem
 from folders import check_root, day_folder, prepare_day_folder
-from graph_client import EmailNotArrived, GraphClient
+from graph_client import BookingSheet, EmailNotArrived, GraphClient
 from logger import get_logger, setup_logging
 from run_guard import finished_today, mark_finished, single_run
 
@@ -201,13 +202,13 @@ def start(interactive: bool = False, headless: bool | None = None) -> tuple[dict
 
 
 def wait_for_email(
-    fetch: Callable[[], bytes],
+    fetch: Callable[[], BookingSheet],
     today: date,
     until: clock,
     every: timedelta,
     now: Callable[[], datetime] = datetime.now,
     sleep: Callable[[float], None] = time.sleep,
-) -> bytes:
+) -> BookingSheet:
     """Call fetch until the email has arrived or until today at `until`.
 
     Only EmailNotArrived is waited out; every other problem stops at once.
@@ -238,17 +239,18 @@ def wait_for_email(
             sleep(wait.total_seconds())
 
 
-def fetch_from_email(config: dict, today: date) -> Path:
+def fetch_from_email(config: dict, today: date) -> tuple[Path, str]:
     """Download today's booking spreadsheet and save it beside today's log.
 
     Waits for the email as set in config. A rerun the same day overwrites
-    the copy with the same email's sheet.
+    the copy with the same email's sheet. Returns the saved copy and the
+    file name the sheet had on the email.
     """
     graph = config["graph"]
     client = GraphClient(
         graph["tenant_id"], graph["client_id"], graph["client_secret"], graph["mailbox"]
     )
-    content = wait_for_email(
+    sheet = wait_for_email(
         lambda: client.fetch_booking_sheet(today, graph["sender"], graph["subject_contains"]),
         today,
         graph["check_until"],
@@ -256,13 +258,29 @@ def fetch_from_email(config: dict, today: date) -> Path:
     )
     path = config["paths"]["logs"] / f"{today:%Y-%m-%d}.xlsx"
     try:
-        path.write_bytes(content)
+        path.write_bytes(sheet.content)
     except OSError as error:
         raise SystemProblem(
             f"Could not save the emailed spreadsheet: {type(error).__name__}"
         ) from error
     get_logger().info("Spreadsheet saved beside today's log")
-    return path
+    return path, sheet.name
+
+
+def copy_sheet_to_drive(source: Path, target: Path) -> None:
+    """Copy the emailed sheet into the day folder beside the four folders.
+
+    A failed copy is logged and the run goes on: the PDFs are the work, and
+    the sheet is still in logs. A rerun the same day overwrites the copy.
+    """
+    try:
+        shutil.copyfile(source, target)
+    except OSError as error:
+        get_logger().warning(
+            "Could not copy the spreadsheet to the day folder: %s", type(error).__name__
+        )
+        return
+    get_logger().info("Spreadsheet copied to the day folder")
 
 
 def run(
@@ -295,6 +313,9 @@ def _guarded_run(
     check_root(root)
     folder = day_folder(root, today)
     from_email = path is None
+    # Only the emailed sheet is copied to the drive. A local file may not be
+    # today's sheet, the same reason it never marks the day done.
+    sheet_name = None
 
     if from_email and finished_today(folder):
         if not force:
@@ -304,7 +325,7 @@ def _guarded_run(
         log.warning("Today is already marked done; running again because of --force")
 
     if from_email:
-        path = fetch_from_email(config, today)
+        path, sheet_name = fetch_from_email(config, today)
 
     people = read_people(path)
     ready = [p for p in people if not p.problem]
@@ -321,6 +342,8 @@ def _guarded_run(
     # wasted sign-in.
     pdf_dir = prepare_day_folder(config["paths"]["hearings_root"], today)
     log.info("Day folder ready")
+    if sheet_name:
+        copy_sheet_to_drive(path, folder / sheet_name)
 
     outcomes = search_people(config, ready, pdf_dir)
 

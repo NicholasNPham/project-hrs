@@ -95,9 +95,13 @@ def setup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict:
     config = {"paths": {"hearings_root": root, "logs": logs}}
     state = {"config": config, "root": root, "searches": 0, "fetches": 0}
 
-    def fetch(config: dict, today: date) -> Path:
+    sheet = tmp_path / "sheet.xlsx"
+    sheet.write_bytes(b"fake xlsx bytes")
+    state["sheet"] = sheet
+
+    def fetch(config: dict, today: date) -> tuple[Path, str]:
         state["fetches"] += 1
-        return tmp_path / "sheet.xlsx"
+        return sheet, "Copy of Bookings List.xlsx"
 
     def search(config: dict, people: list, pdf_dir: Path) -> dict:
         state["searches"] += 1
@@ -190,3 +194,47 @@ def test_missing_drive_stops_before_the_email(setup: dict) -> None:
     with pytest.raises(SystemProblem, match="cannot be reached"):
         _run(setup)
     assert setup["fetches"] == 0
+
+
+# The sheet on the drive
+
+
+def _sheet_copy(state: dict) -> Path:
+    """Where the emailed sheet is copied, under its name from the email."""
+    return day_folder(state["root"], TODAY) / "Copy of Bookings List.xlsx"
+
+
+def test_email_run_copies_the_sheet_beside_the_four_folders(setup: dict) -> None:
+    """The day folder gets the sheet under the name it had on the email."""
+    _run(setup)
+
+    assert _sheet_copy(setup).read_bytes() == b"fake xlsx bytes"
+
+
+def test_sheet_is_copied_before_the_search(setup: dict, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A run that stops in CCIS still leaves the sheet on the drive."""
+    def broken(config: dict, people: list, pdf_dir: Path) -> dict:
+        raise SystemProblem("CCIS went away")
+
+    monkeypatch.setattr(main, "search_people", broken)
+
+    with pytest.raises(SystemProblem):
+        _run(setup)
+    assert _sheet_copy(setup).exists()
+
+
+def test_local_file_run_does_not_copy_a_sheet(setup: dict, tmp_path: Path) -> None:
+    """A local sheet may not be today's, so it stays off the drive."""
+    _run(setup, path=tmp_path / "local.xlsx")
+
+    assert not _sheet_copy(setup).exists()
+
+
+def test_failed_copy_is_logged_and_the_run_goes_on(setup: dict, caplog: pytest.LogCaptureFixture) -> None:
+    """The PDFs matter more than the copy, and the sheet is still in logs."""
+    setup["sheet"].unlink()
+
+    assert _run(setup) == 0
+    assert setup["searches"] == 1
+    assert _marker(setup).exists()
+    assert "Could not copy the spreadsheet to the day folder: FileNotFoundError" in caplog.text
