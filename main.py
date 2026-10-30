@@ -495,7 +495,8 @@ def _command(argv: list[str], interactive: bool) -> int:
         if args.check:
             path = args.spreadsheet
             if args.email:
-                path = fetch_from_email(*start())
+                # A check reads the sheet only, so it leaves the drive alone.
+                path, _ = fetch_from_email(*start())
             describe_layout(path)
             describe_people(read_people(path))
             return 0
